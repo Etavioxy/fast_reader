@@ -1,0 +1,11 @@
+[package]
+name = "fast-reader-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Benchmark: fast_reader vs std BufRead vs coreutils vs python"
+publish = false
+
+[dependencies]
+fast_reader = { path = ".." }
+serde_json = "1"
+
