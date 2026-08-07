@@ -37,7 +37,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
 #[cfg(feature = "rand")]
 use rand::Rng;
@@ -72,6 +72,10 @@ pub struct FastReader<R: Read + Seek> {
 
     // --- config ---
     chunk_size: usize,
+
+    // --- index (optional, enables jump_to_line) ---
+    index: Vec<u64>,
+    indexed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +101,8 @@ impl<R: Read + Seek> FastReader<R> {
             at_bof: true,
             at_eof: file_size == 0,
             chunk_size: DEFAULT_CHUNK,
+            index: Vec::new(),
+            indexed: false,
         })
     }
 
@@ -328,8 +334,67 @@ impl<R: Read + Seek> FastReader<R> {
         Ok(if line.is_empty() { None } else { Some(line) })
     }
 
-    // -- internal helpers ---------------------------------------------------
+    // -- index & jump -------------------------------------------------------
 
+    /// Build a line-start offset index (O(N) scan).
+    ///
+    /// Enables O(1) [`jump_to_line`].  Does **not** change the behaviour or
+    /// performance of [`next_line`] / [`prev_line`] / [`random_line`] —
+    /// those methods ignore the index entirely.
+    ///
+    /// Memory: ~8 bytes per line (8 MB for 1M-line file).
+    pub fn build_index(&mut self) -> io::Result<&mut Self> {
+        let saved_start = self.line_start;
+        let saved_end = self.line_end;
+        let saved_eof = self.at_eof;
+        let saved_bof = self.at_bof;
+
+        self.index.clear();
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut br = BufReader::with_capacity(self.chunk_size, &mut self.file);
+        let mut buf = String::new();
+        let mut off: u64 = 0;
+        loop {
+            buf.clear();
+            let n = br.read_line(&mut buf)?;
+            if n == 0 { break; }
+            self.index.push(off);
+            off += n as u64;
+        }
+        self.indexed = true;
+
+        self.file.seek(SeekFrom::Start(saved_start))?;
+        self.line_start = saved_start;
+        self.line_end = saved_end;
+        self.at_eof = saved_eof;
+        self.at_bof = saved_bof;
+        self.fbuf_start = 0;
+        self.fbuf_fill = 0;
+        self.fbuf_pos = 0;
+        Ok(self)
+    }
+
+    /// Jump to line `n` (1-based).  Requires [`build_index`].
+    pub fn jump_to_line(&mut self, n: usize) -> io::Result<Option<String>> {
+        assert!(self.indexed, "build_index() must be called first");
+        if n == 0 || n > self.index.len() { return Ok(None); }
+        let off = self.index[n - 1];
+        self.file.seek(SeekFrom::Start(off))?;
+        let mut buf = String::new();
+        BufReader::with_capacity(self.chunk_size, &mut self.file).read_line(&mut buf)?;
+        self.line_start = off;
+        self.line_end = off + buf.len() as u64;
+        self.at_bof = off == 0;
+        self.at_eof = self.line_end >= self.file_size;
+        self.fbuf_start = 0; self.fbuf_fill = 0; self.fbuf_pos = 0;
+        let t = buf.trim_end_matches(&['\r', '\n'][..]);
+        Ok(if t.is_empty() { None } else { Some(t.to_string()) })
+    }
+
+    /// Line count (requires [`build_index`]).
+    pub fn line_count(&self) -> usize { self.index.len() }
+
+    // -- internal helpers ---------------------------------------------------
     /// Make sure `self.fbuf` has data at `self.fbuf_pos`.
     fn ensure_buf(&mut self) -> io::Result<()> {
         if self.fbuf_pos < self.fbuf_fill {
