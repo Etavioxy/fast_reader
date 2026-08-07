@@ -122,6 +122,47 @@ fn prev_line_unaffected_by_index() {
 }
 
 #[test]
+#[test]
+fn read_half_then_jump_back() {
+    // next读到50% → jump到30% → next_line从30%继续
+    let p = "/tmp/fr_t_half_jump_back.txt";
+    let mut f = File::create(p).unwrap();
+    for i in 0..100 {
+        writeln!(f, "line{:03}", i).unwrap();
+    }
+    drop(f);
+
+    let mut r = FastReader::new(File::open(p).unwrap()).unwrap();
+    r.build_index().unwrap();
+    assert_eq!(r.line_count(), 100);
+
+    // 向前读到 50%
+    r.bof();
+    for _ in 0..50 {
+        r.next_line().unwrap();
+    }
+    let at50 = r.current_line().unwrap().unwrap();
+    assert_eq!(at50, "line049", "line at 50%");
+
+    // 反向跳到 30%
+    let tgt = (r.line_count() as f64 * 0.3).floor() as usize;
+    let jumped = r.jump_to_line(tgt).unwrap().unwrap();
+    assert_eq!(jumped, format!("line{:03}", tgt - 1), "jump to 30%");
+
+    // next_line 从 30% 继续 — 关键：fbuf 被 invalidate 后要正确 seek
+    let nxt = r.next_line().unwrap().unwrap();
+    assert_eq!(nxt, format!("line{:03}", tgt), "next after backward jump");
+
+    // 循环验证从 30% 到 50% 的每一行
+    for i in tgt + 1..50 {
+        let l = r.next_line().unwrap().unwrap();
+        assert_eq!(l, format!("line{:03}", i), "line after backward jump at {i}");
+    }
+
+    let _ = fs::remove_file(p);
+}
+
+#[test]
 fn crlf_index() {
     let p = "/tmp/fr_t_crlf.txt";
     let mut f = File::create(p).unwrap();
