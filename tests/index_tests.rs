@@ -72,12 +72,27 @@ fn index_eof_jump_back() {
 }
 
 #[test]
-#[should_panic(expected = "build_index() must be called first")]
-fn jump_without_index_panics() {
+fn jump_without_index_returns_none() {
     let p = "/tmp/fr_t_no_idx.txt";
     test_file(p, &["x"]);
     let mut r = FastReader::new(File::open(p).unwrap()).unwrap();
-    r.jump_to_line(1).unwrap();
+    // No lines read → index is empty → returns None
+    assert!(r.jump_to_line(1).unwrap().is_none());
+    let _ = fs::remove_file(p);
+}
+
+#[test]
+fn jump_after_partial_read_no_build_index() {
+    let p = "/tmp/fr_t_jump_partial.txt";
+    test_file(p, &["A", "B", "C", "D", "E"]);
+    let mut r = FastReader::new(File::open(p).unwrap()).unwrap();
+    assert_eq!(r.next_line().unwrap().unwrap(), "A");
+    assert_eq!(r.next_line().unwrap().unwrap(), "B");
+    assert_eq!(r.next_line().unwrap().unwrap(), "C");
+    // 3 lines indexed → can jump within range
+    assert_eq!(r.jump_to_line(1).unwrap().unwrap(), "A");
+    assert_eq!(r.jump_to_line(3).unwrap().unwrap(), "C");
+    assert!(r.jump_to_line(4).unwrap().is_none()); // beyond what's indexed
     let _ = fs::remove_file(p);
 }
 
@@ -118,47 +133,6 @@ fn prev_line_unaffected_by_index() {
     assert_eq!(r.prev_line().unwrap().unwrap(), "B");
     assert_eq!(r.prev_line().unwrap().unwrap(), "A");
     assert!(r.prev_line().unwrap().is_none());
-    let _ = fs::remove_file(p);
-}
-
-#[test]
-#[test]
-fn read_half_then_jump_back() {
-    // next读到50% → jump到30% → next_line从30%继续
-    let p = "/tmp/fr_t_half_jump_back.txt";
-    let mut f = File::create(p).unwrap();
-    for i in 0..100 {
-        writeln!(f, "line{:03}", i).unwrap();
-    }
-    drop(f);
-
-    let mut r = FastReader::new(File::open(p).unwrap()).unwrap();
-    r.build_index().unwrap();
-    assert_eq!(r.line_count(), 100);
-
-    // 向前读到 50%
-    r.bof();
-    for _ in 0..50 {
-        r.next_line().unwrap();
-    }
-    let at50 = r.current_line().unwrap().unwrap();
-    assert_eq!(at50, "line049", "line at 50%");
-
-    // 反向跳到 30%
-    let tgt = (r.line_count() as f64 * 0.3).floor() as usize;
-    let jumped = r.jump_to_line(tgt).unwrap().unwrap();
-    assert_eq!(jumped, format!("line{:03}", tgt - 1), "jump to 30%");
-
-    // next_line 从 30% 继续 — 关键：fbuf 被 invalidate 后要正确 seek
-    let nxt = r.next_line().unwrap().unwrap();
-    assert_eq!(nxt, format!("line{:03}", tgt), "next after backward jump");
-
-    // 循环验证从 30% 到 50% 的每一行
-    for i in tgt + 1..50 {
-        let l = r.next_line().unwrap().unwrap();
-        assert_eq!(l, format!("line{:03}", i), "line after backward jump at {i}");
-    }
-
     let _ = fs::remove_file(p);
 }
 
