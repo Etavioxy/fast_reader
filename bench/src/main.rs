@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 const REPS: usize = 5;
@@ -315,6 +315,28 @@ fn normalize(s: &str) -> String { s.replace("\r\n", "\n").trim().to_string() }
 //  all — full matrix
 // -----------------------------------------------------------------------
 
+/// Run a cell as a fresh subprocess — zero cross-impl state leakage.
+fn time_standalone(imp: Impl, case: &str, data: &str, params: &[String]) -> io::Result<f64> {
+    let exe = std::env::current_exe()?;
+    let run = || -> io::Result<()> {
+        let mut c = Command::new(&exe);
+        c.arg("run").arg(imp.name()).arg(case).arg(data);
+        for p in params { c.arg(p); }
+        c.stdout(Stdio::null()).stderr(Stdio::null());
+        c.status()?;
+        Ok(())
+    };
+    run()?; // warmup
+    let mut times = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let t0 = Instant::now();
+        run()?;
+        times.push(t0.elapsed().as_secs_f64() * 1000.0);
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Ok(times[REPS / 2])
+}
+
 fn all(data: &str) -> io::Result<()> {
     let cases: Vec<(&str, Vec<String>)> = vec![
         ("head", vec!["10".into()]),
@@ -354,7 +376,7 @@ fn all(data: &str) -> io::Result<()> {
                 } else {
                     normalize(&res) == normalize(golden.get(*case).unwrap())
                 };
-                if ok { (time_case(imp, case, data, params)?, "PASS") }
+                if ok { (time_standalone(imp, case, data, params)?, "PASS") }
                 else { (0.0, "FAIL") }
             };
             out.push_str(&format!("{case}\t{}\t{median:.3}\t{status}\n", imp.name()));
