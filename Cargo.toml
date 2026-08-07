@@ -1,0 +1,29 @@
+[package]
+name = "fast_reader"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.65"
+authors = ["Etavioxy <etavioxy@foxmail.com>"]
+description = "A drop-in replacement for easy_reader — buffered bidirectional line navigation for huge files, matching or exceeding CLI tool performance."
+readme = "README.md"
+keywords = ["lines", "reader", "reverse", "backwards", "random", "index"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Etavioxy/fast_reader"
+
+[dependencies]
+rand = { version = "0.8", optional = true }
+
+[features]
+default = ["rand"]
+
+[lib]
+name = "fast_reader"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fr"
+path = "src/main.rs"
+
+[[example]]
+name = "api_test"
+path = "examples/api_test.rs"
