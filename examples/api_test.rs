@@ -38,25 +38,10 @@ fn main() {
     for _ in 0..20 {
         match r.random_line() {
             Ok(Some(l)) => assert!(!l.is_empty()),
-            Ok(None) => { /* small file, bad offset — retry handled by lib */ }
+            Ok(None) => { /* small file, bad offset — retry */ }
             Err(e) => panic!("random_line error: {e}"),
         }
     }
-
-    // === build_index + jump_to_line ===
-    r.bof();
-    r.build_index().unwrap();
-    assert_eq!(r.line_count(), 5, "5 lines");
-
-    // after build_index(), next_line still works (index doesn't change it)
-    r.bof();
-    assert_eq!(r.next_line().unwrap().unwrap(), "AAAA AAAA", "post-index fwd");
-
-    // jump_to_line
-    assert_eq!(r.jump_to_line(3).unwrap().unwrap(), "CCCC  CCCCC", "jump L3");
-    assert_eq!(r.jump_to_line(5).unwrap().unwrap(), "EEEE  EEEEE  EEEE  EEEEE", "jump L5");
-    assert!(r.jump_to_line(0).unwrap().is_none(), "jump L0");
-    assert!(r.jump_to_line(99).unwrap().is_none(), "jump L99 out of range");
 
     // === empty file ===
     let empty_path = "/tmp/fr_empty_test.txt";
