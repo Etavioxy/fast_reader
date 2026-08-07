@@ -73,9 +73,10 @@ pub struct FastReader<R: Read + Seek> {
     // --- config ---
     chunk_size: usize,
 
-    // --- index (optional, enables jump_to_line) ---
+    // --- index (optional, accelerates all ops after build_index) ---
     index: Vec<u64>,
     indexed: bool,
+    current_line_num: usize,  // 0 = before first line; 1 = on line 1, etc.
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,7 @@ impl<R: Read + Seek> FastReader<R> {
             chunk_size: DEFAULT_CHUNK,
             index: Vec::new(),
             indexed: false,
+            current_line_num: 0,
         })
     }
 
@@ -128,7 +130,7 @@ impl<R: Read + Seek> FastReader<R> {
         self.at_eof = self.file_size == 0;
         self.line_start = 0;
         self.line_end = 0;
-        // invalidate forward buffer so the next read seeks to 0
+        self.current_line_num = 0;
         self.fbuf_start = 0;
         self.fbuf_fill = 0;
         self.fbuf_pos = 0;
@@ -141,6 +143,9 @@ impl<R: Read + Seek> FastReader<R> {
         self.at_eof = true;
         self.line_start = self.file_size;
         self.line_end = self.file_size;
+        if self.indexed {
+            self.current_line_num = self.index.len();
+        }
         self
     }
 
@@ -155,48 +160,38 @@ impl<R: Read + Seek> FastReader<R> {
             return Ok(None);
         }
         self.at_bof = false;
-
-        // advance past the previous line
         self.line_start = self.line_end;
-
+        // if buffer doesn't cover current position (e.g. after jump_to_line),
+        // seek and refill
+        let pos = self.line_start;
+        if pos < self.fbuf_start
+            || pos >= self.fbuf_start + self.fbuf_fill as u64
+        {
+            self.file.seek(SeekFrom::Start(pos))?;
+            self.fbuf_start = pos;
+            self.fbuf_fill = 0;
+            self.fbuf_pos = 0;
+        }
         loop {
-            // ensure we have buffer data at the current position
             self.ensure_buf()?;
-
-            // scan for LF
             let pos = self.fbuf_pos;
             let fill = self.fbuf_fill;
             if let Some(rel) = self.fbuf[pos..fill].iter().position(|&b| b == LF) {
                 let abs = pos + rel;
-                let byte_end = abs + 1; // past LF
-                // strip CR
+                let byte_end = abs + 1;
                 let mut content_end = abs;
-                if content_end > 0
-                    && pos < content_end
-                    && self.fbuf[content_end - 1] == CR
-                {
+                if content_end > 0 && pos < content_end && self.fbuf[content_end - 1] == CR {
                     content_end -= 1;
                 }
                 let line = String::from_utf8_lossy(&self.fbuf[pos..content_end]).into_owned();
-
                 self.fbuf_pos = byte_end;
-                self.line_end =
-                    self.fbuf_start + byte_end as u64;
-
-                // if we've reached EOF
+                self.line_end = self.fbuf_start + byte_end as u64;
                 if self.line_end >= self.file_size {
                     self.at_eof = true;
                 }
-                return Ok(if line.is_empty() && self.at_eof {
-                    None
-                } else {
-                    Some(line)
-                });
+                return Ok(if line.is_empty() && self.at_eof { None } else { Some(line) });
             }
-
-            // no LF in buffer — compact and read more, or EOF
             if self.fbuf_start + self.fbuf_fill as u64 >= self.file_size {
-                // reached physical EOF
                 self.at_eof = true;
                 if pos < fill {
                     let line = String::from_utf8_lossy(&self.fbuf[pos..fill]).into_owned();
@@ -206,7 +201,6 @@ impl<R: Read + Seek> FastReader<R> {
                 }
                 return Ok(None);
             }
-            // compact and read more
             self.compact_and_fill()?;
         }
     }
@@ -299,6 +293,11 @@ impl<R: Read + Seek> FastReader<R> {
         self.at_bof = false;
         self.at_eof = false;
 
+        if self.indexed && !self.index.is_empty() {
+            let n = rand::thread_rng().gen_range(1..=self.index.len());
+            return self.indexed_read(n);
+        }
+
         let off = rand::thread_rng().gen_range(0..self.file_size);
 
         let window = self.chunk_size as u64;
@@ -363,6 +362,18 @@ impl<R: Read + Seek> FastReader<R> {
         }
         self.indexed = true;
 
+        // compute current_line_num from saved position
+        self.current_line_num = if saved_bof {
+            0
+        } else if saved_eof {
+            self.index.len()
+        } else {
+            match self.index.binary_search(&saved_start) {
+                Ok(i) => i + 1,
+                Err(i) => i,
+            }
+        };
+
         self.file.seek(SeekFrom::Start(saved_start))?;
         self.line_start = saved_start;
         self.line_end = saved_end;
@@ -386,6 +397,7 @@ impl<R: Read + Seek> FastReader<R> {
         self.line_end = off + buf.len() as u64;
         self.at_bof = off == 0;
         self.at_eof = self.line_end >= self.file_size;
+        self.current_line_num = n;
         self.fbuf_start = 0; self.fbuf_fill = 0; self.fbuf_pos = 0;
         let t = buf.trim_end_matches(&['\r', '\n'][..]);
         Ok(if t.is_empty() { None } else { Some(t.to_string()) })
@@ -393,6 +405,23 @@ impl<R: Read + Seek> FastReader<R> {
 
     /// Line count (requires [`build_index`]).
     pub fn line_count(&self) -> usize { self.index.len() }
+
+    // -- indexed helpers (used when self.indexed == true) --------------------
+
+    fn indexed_read(&mut self, n: usize) -> io::Result<Option<String>> {
+        let off = self.index[n - 1];
+        self.file.seek(SeekFrom::Start(off))?;
+        let mut buf = String::new();
+        BufReader::with_capacity(self.chunk_size, &mut self.file).read_line(&mut buf)?;
+        self.line_start = off;
+        self.line_end = off + buf.len() as u64;
+        self.at_bof = off == 0;
+        self.at_eof = self.line_end >= self.file_size;
+        self.current_line_num = n;
+        self.fbuf_start = 0; self.fbuf_fill = 0; self.fbuf_pos = 0;
+        let t = buf.trim_end_matches(&['\r', '\n'][..]);
+        Ok(if t.is_empty() { None } else { Some(t.to_string()) })
+    }
 
     // -- internal helpers ---------------------------------------------------
     /// Make sure `self.fbuf` has data at `self.fbuf_pos`.
