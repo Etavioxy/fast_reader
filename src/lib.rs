@@ -73,9 +73,8 @@ pub struct FastReader<R: Read + Seek> {
     // --- config ---
     chunk_size: usize,
 
-    // --- index (optional, accelerates all ops after build_index) ---
+    // --- index (always maintained incrementally) ---
     index: Vec<u64>,
-    indexed: bool,
     current_line_num: usize,  // 0 = before first line; 1 = on line 1, etc.
 }
 
@@ -103,7 +102,6 @@ impl<R: Read + Seek> FastReader<R> {
             at_eof: file_size == 0,
             chunk_size: DEFAULT_CHUNK,
             index: Vec::new(),
-            indexed: false,
             current_line_num: 0,
         })
     }
@@ -143,9 +141,7 @@ impl<R: Read + Seek> FastReader<R> {
         self.at_eof = true;
         self.line_start = self.file_size;
         self.line_end = self.file_size;
-        if self.indexed {
-            self.current_line_num = self.index.len();
-        }
+        self.current_line_num = self.index.len();
         self
     }
 
@@ -186,6 +182,10 @@ impl<R: Read + Seek> FastReader<R> {
                 let line = String::from_utf8_lossy(&self.fbuf[pos..content_end]).into_owned();
                 self.fbuf_pos = byte_end;
                 self.line_end = self.fbuf_start + byte_end as u64;
+                if self.current_line_num == self.index.len() {
+                    self.index.push(self.line_start);
+                }
+                self.current_line_num += 1;
                 if self.line_end >= self.file_size {
                     self.at_eof = true;
                 }
@@ -197,6 +197,10 @@ impl<R: Read + Seek> FastReader<R> {
                     let line = String::from_utf8_lossy(&self.fbuf[pos..fill]).into_owned();
                     self.fbuf_pos = fill;
                     self.line_end = self.file_size;
+                    if self.current_line_num == self.index.len() {
+                        self.index.push(self.line_start);
+                    }
+                    self.current_line_num += 1;
                     return Ok(if line.is_empty() { None } else { Some(line) });
                 }
                 return Ok(None);
@@ -293,7 +297,7 @@ impl<R: Read + Seek> FastReader<R> {
         self.at_bof = false;
         self.at_eof = false;
 
-        if self.indexed && !self.index.is_empty() {
+        if !self.index.is_empty() {
             let n = rand::thread_rng().gen_range(1..=self.index.len());
             return self.indexed_read(n);
         }
@@ -335,11 +339,11 @@ impl<R: Read + Seek> FastReader<R> {
 
     // -- index & jump -------------------------------------------------------
 
-    /// Build a line-start offset index (O(N) scan).
+    /// Build a complete line-start offset index.
     ///
-    /// Enables O(1) [`jump_to_line`].  Does **not** change the behaviour or
-    /// performance of [`next_line`] / [`prev_line`] / [`random_line`] —
-    /// those methods ignore the index entirely.
+    /// If lines have already been read via [`next_line`], only the **remaining**
+    /// unindexed portion is scanned.  Enables O(1) [`jump_to_line`] for every
+    /// line in the file and makes [`line_count`] exact.
     ///
     /// Memory: ~8 bytes per line (8 MB for 1M-line file).
     pub fn build_index(&mut self) -> io::Result<&mut Self> {
@@ -348,19 +352,35 @@ impl<R: Read + Seek> FastReader<R> {
         let saved_eof = self.at_eof;
         let saved_bof = self.at_bof;
 
-        self.index.clear();
-        self.file.seek(SeekFrom::Start(0))?;
-        let mut br = BufReader::with_capacity(self.chunk_size, &mut self.file);
-        let mut buf = String::new();
-        let mut off: u64 = 0;
-        loop {
-            buf.clear();
-            let n = br.read_line(&mut buf)?;
-            if n == 0 { break; }
-            self.index.push(off);
-            off += n as u64;
+        // Determine scan start: resume from after the last already-indexed line
+        let scan_from = if let Some(&last) = self.index.last() {
+            self.file.seek(SeekFrom::Start(last))?;
+            let mut tmp = String::new();
+            let n = BufReader::with_capacity(self.chunk_size, &mut self.file)
+                .read_line(&mut tmp)?;
+            if n == 0 {
+                return Ok(self);
+            }
+            last + n as u64
+        } else {
+            0
+        };
+
+        if scan_from < self.file_size {
+            self.file.seek(SeekFrom::Start(scan_from))?;
+            let mut br = BufReader::with_capacity(self.chunk_size, &mut self.file);
+            let mut buf = String::new();
+            let mut off = scan_from;
+            loop {
+                buf.clear();
+                let n = br.read_line(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                self.index.push(off);
+                off += n as u64;
+            }
         }
-        self.indexed = true;
 
         // compute current_line_num from saved position
         self.current_line_num = if saved_bof {
@@ -385,9 +405,9 @@ impl<R: Read + Seek> FastReader<R> {
         Ok(self)
     }
 
-    /// Jump to line `n` (1-based).  Requires [`build_index`].
+    /// Jump to line `n` (1-based).  Returns `None` if the line is not (yet)
+    /// indexed — call [`build_index`] to guarantee full coverage.
     pub fn jump_to_line(&mut self, n: usize) -> io::Result<Option<String>> {
-        assert!(self.indexed, "build_index() must be called first");
         if n == 0 || n > self.index.len() { return Ok(None); }
         let off = self.index[n - 1];
         self.file.seek(SeekFrom::Start(off))?;
@@ -403,10 +423,15 @@ impl<R: Read + Seek> FastReader<R> {
         Ok(if t.is_empty() { None } else { Some(t.to_string()) })
     }
 
-    /// Line count (requires [`build_index`]).
-    pub fn line_count(&self) -> usize { self.index.len() }
+    /// Number of lines currently indexed.
+    ///
+    /// After [`build_index`] this is the total line count; while reading
+    /// forward it reflects lines read so far.
+    pub fn line_count(&self) -> usize {
+        self.index.len()
+    }
 
-    // -- indexed helpers (used when self.indexed == true) --------------------
+    // -- indexed helpers ----------------------------------------------------
 
     fn indexed_read(&mut self, n: usize) -> io::Result<Option<String>> {
         let off = self.index[n - 1];
