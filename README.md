@@ -9,6 +9,15 @@
 
 `fast_reader` keeps the same API surface, adds a persistent 64KB read buffer, and reduces forward-reading syscalls to **~0.003 per line** — matching `std::io::BufRead` and GNU coreutils.
 
+## Usage
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+fast_reader = "0.1"
+```
+
 ```rust
 use fast_reader::FastReader;
 use std::fs::File;
