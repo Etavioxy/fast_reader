@@ -86,6 +86,10 @@ Full `easy_reader` compatibility plus extras:
 | `file_size()` | File size in bytes |
 | `chunk_size(n)` | Set buffer size (default 64KB) |
 
+## AI-generated
+
+> This codebase was written with AI assistance — 100% AI-generated (with human review). It is evidence for quality-assured engineering with AI tooling.
+
 ## License
 
 MIT OR Apache-2.0
