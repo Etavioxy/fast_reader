@@ -1,5 +1,7 @@
 # fast_reader
 
+English | [中文](README.zh.md)
+
 [![Crates.io](https://img.shields.io/crates/v/fast_reader)](https://crates.io/crates/fast_reader)
 [![License](https://img.shields.io/crates/l/fast_reader)](LICENSE)
 
