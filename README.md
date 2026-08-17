@@ -103,4 +103,4 @@ Full `easy_reader` compatibility plus extras:
 
 ## License
 
-MIT OR Apache-2.0
+MIT

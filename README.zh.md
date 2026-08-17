@@ -105,4 +105,4 @@ let line = r.random_line()?;
 
 ## License
 
-MIT OR Apache-2.0
+MIT
